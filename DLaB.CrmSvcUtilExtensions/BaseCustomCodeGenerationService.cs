@@ -4,9 +4,9 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
-using DLaB.Common;
-using DLaB.Common.VersionControl;
 using Microsoft.Crm.Services.Utility;
+using Source.DLaB.Common;
+using Source.DLaB.Common.VersionControl;
 
 namespace DLaB.CrmSvcUtilExtensions
 {
@@ -68,11 +68,11 @@ namespace DLaB.CrmSvcUtilExtensions
             return GetTypeForResponseFieldInternal(response, responseField, services);
         }
 
-        public void Write(IOrganizationMetadata organizationMetadata, string language, string outputFile, string targetNamespace, IServiceProvider services)
+        public void Write(IOrganizationMetadata organizationMetadata, string language, string outputFile, string outputNamespace, IServiceProvider services)
         {
             try
             {
-                WriteInternal(organizationMetadata, language, Path.GetFullPath(outputFile), targetNamespace, services);
+                WriteInternal(organizationMetadata, language, Path.GetFullPath(outputFile), outputNamespace, services);
             }
             catch (Exception ex)
             {
@@ -125,11 +125,10 @@ namespace DLaB.CrmSvcUtilExtensions
             ServiceProvider = services;
             if (UseTfsToCheckoutFiles)
             {
-                Action<string> write = s => { if (LoggingEnabled) { Log(s); } };
                 Tfs = new VsTfsSourceControlProvider(null, new ProcessExecutorInfo
                 {
-                    OnOutputReceived = write,
-                    OnErrorReceived = write
+                    OnOutputReceived = Log,
+                    OnErrorReceived = DisplayMessage
                 });
             }
             DisplayMessage("Ensuring Context File is Accessible");
@@ -191,7 +190,10 @@ namespace DLaB.CrmSvcUtilExtensions
         protected IEnumerable<string> GetFileTextWithUpdatedClassComment(string filePath, string commandLineText, bool removeRuntimeVersionComment)
         {
             var skipLine = removeRuntimeVersionComment ? 3 : -1;
-            return GetNewLines(File.ReadAllLines(filePath), 8, "// Created via this command line: " + commandLineText, skipLine);
+            commandLineText = string.IsNullOrWhiteSpace(commandLineText)
+                ? ""
+                : "// Created via this command line: " + commandLineText;
+            return GetNewLines(File.ReadAllLines(filePath), 8, commandLineText, skipLine);
         }
 
         private IEnumerable<string> GetNewLines(string[] lines, int insertAtLine, string text, int skipLine)
@@ -384,7 +386,7 @@ namespace DLaB.CrmSvcUtilExtensions
                     Tfs.Get(true, batch.ToArray());
                 }
 
-                if (!Debugger.IsAttached)
+                if (Debugger.IsAttached)
                 {
                     DisplayMessage("Creating Temporary Files");
                     foreach (var file in files)
@@ -409,7 +411,7 @@ namespace DLaB.CrmSvcUtilExtensions
             }
             else
             {
-                if (!Debugger.IsAttached)
+                if (Debugger.IsAttached)
                 {
                     foreach (var file in files)
                     {
@@ -446,6 +448,8 @@ namespace DLaB.CrmSvcUtilExtensions
                 var tfsFile = File.ReadAllText(file.Path);
                 if (tfsFile.Equals(file.Contents))
                 {
+                    Log(tfsFile);
+                    Log(file.Contents);
                     Log(file.Path + " was unchanged.");
                     return;
                 }
@@ -635,7 +639,17 @@ namespace DLaB.CrmSvcUtilExtensions
                     ProjectPath = file.FullName;
                     Lines = File.ReadAllLines(ProjectPath).ToList();
                     ProjectDir = Path.GetDirectoryName(ProjectPath);
-                    ProjectFileIndexStart = Lines.FindIndex(l => l.Contains("<Compile Include="));
+                    if (!Lines.Any(l => l.Contains("<Compile Include=")))
+                    {
+                        ProjectFileIndexStart = Lines.FindLastIndex(l => l.Contains("</PropertyGroup>"))+1;
+                        Lines.Insert(ProjectFileIndexStart, "</ItemGroup>");
+                        Lines.Insert(ProjectFileIndexStart, "<ItemGroup>");
+                        ProjectFileIndexStart++;
+                    }
+                    else
+                    {
+                        ProjectFileIndexStart = Lines.FindIndex(l => l.Contains("<Compile Include="));
+                    }
                     foreach (var line in Lines.Skip(ProjectFileIndexStart).TakeWhile(l => l.Contains("<Compile Include=")))
                     {
                         ProjectFiles.Add(line, line);
@@ -643,8 +657,14 @@ namespace DLaB.CrmSvcUtilExtensions
                     ProjectFileIndexEnd = ProjectFileIndexStart + ProjectFiles.Count;
 
                     // Determine Line Format, defaulting if none currently exist
-                    var first = ProjectFiles.Keys.FirstOrDefault() ?? "    <Compile Include=\"\" />";
-                    LineFormat = first.Substring(0, first.IndexOf("\"", StringComparison.Ordinal) + 1) + "{0}" + first.Substring(first.LastIndexOf("\"", StringComparison.Ordinal), first.Length - first.LastIndexOf("\"", StringComparison.Ordinal));
+                    var first = ProjectFiles.Keys.FirstOrDefault() ?? (ProjectPath.EndsWith("projitems") 
+                                    ? "    <Compile Include=\"$(MSBuildThisFileDirectory)\" />"
+                                    : "    <Compile Include=\"\" />");
+
+                    var startEndIndex = first.Contains("$(") 
+                        ? first.IndexOf(")", first.IndexOf("$(", StringComparison.Ordinal), StringComparison.Ordinal) + 1 // Path contains Ms Build Variable
+                        : first.IndexOf("\"", StringComparison.Ordinal) + 1;
+                    LineFormat = first.Substring(0, startEndIndex) + "{0}" + first.Substring(first.LastIndexOf("\"", StringComparison.Ordinal), first.Length - first.LastIndexOf("\"", StringComparison.Ordinal));
                 }
 
                 UpdateProjectFile = updateProjectFile;
@@ -661,8 +681,11 @@ namespace DLaB.CrmSvcUtilExtensions
                         return null;
                     }
 
-                    var firstOrDefault = directory.GetFiles("*.csproj").FirstOrDefault();
-                    if (firstOrDefault != null) return firstOrDefault;
+                    var firstOrDefault = directory.GetFiles("*.csproj").FirstOrDefault() ?? directory.GetFiles("*.projitems").FirstOrDefault();
+                    if (firstOrDefault != null)
+                    {
+                        return firstOrDefault;
+                    }
                     directory = directory.Parent;
                 }
             }
@@ -694,7 +717,7 @@ namespace DLaB.CrmSvcUtilExtensions
                 {
                     Tfs.Add(path);
                 }
-
+                
                 Console.WriteLine(path + " added to project.");
                 ProjectUpdated = true;
             }

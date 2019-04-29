@@ -2,15 +2,18 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using DLaB.AttributeManager.DLaB.Common.Exceptions;
-using DLaB.Xrm;
+using System.Windows.Forms;
+using Source.DLaB.Common.Exceptions;
+using Source.DLaB.Xrm;
 using DLaB.Xrm.Entities;
 using McTools.Xrm.Connection;
 using Microsoft.Crm.Sdk.Messages;
+using Microsoft.VisualBasic.FileIO;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Metadata;
 using Microsoft.Xrm.Sdk.Query;
+using Label = Microsoft.Xrm.Sdk.Label;
 
 namespace DLaB.AttributeManager
 {
@@ -21,6 +24,7 @@ namespace DLaB.AttributeManager
 
         public EntityMetadata Metadata { get; set; }
         public bool MigrateData { get; set; }
+        public bool IgnoreUpdateErrors { get; set; }
         public bool SupportsExecuteMultipleRequest { get; set; }
         public string TempPostfix { get; private set; }
         public IOrganizationService Service { get; private set; }
@@ -34,12 +38,14 @@ namespace DLaB.AttributeManager
         public enum Steps
         {
             CreateTemp = 1,
-            MigrateToTemp = 2,
-            RemoveExistingAttribute = 4,
-            CreateNewAttribute = 8,
-            MigrateToNewAttribute = 16,
-            RemoveTemp = 32,
-            MigrationToTempRequired = 64
+            MigrateDataToTemp = 2,
+            MigrateToTemp = 4,
+            RemoveExistingAttribute = 8,
+            CreateNewAttribute = 16,
+            MigrateDataToNewAttribute = 32,
+            MigrateToNewAttribute = 64,
+            RemoveTemp = 128,
+            MigrationToTempRequired = 256
         }
 
         [Flags]
@@ -63,15 +69,27 @@ namespace DLaB.AttributeManager
             Metadata = metadata;
         }
 
+        public Logic(IOrganizationService service, ConnectionDetail connectionDetail, EntityMetadata metadata, string tempPostFix, bool migrateData, bool ignoreUpdateErrors):
+            this(service, connectionDetail, metadata, tempPostFix, migrateData)
+        {
+            IgnoreUpdateErrors = ignoreUpdateErrors;
+        }
+
         private HashSet<int> GetValidLanguageCodes()
         {
             var resp = (RetrieveAvailableLanguagesResponse)Service.Execute(new RetrieveAvailableLanguagesRequest());
             return new HashSet<int>(resp.LocaleIds);
         }
 
-        public void Run(AttributeMetadata att, string newAttributeSchemaName, Steps stepsToPerform, Action actions, AttributeMetadata newAttributeType = null, Dictionary<string,string> migrationMapping = null)
+        //public void Run(AttributeMetadata att, string newAttributeSchemaName, Steps stepsToPerform, Action actions, AttributeMetadata newAttributeType = null, Dictionary<string,string> migrationMapping = null)
+        public void Run(AttributeManagerPlugin.ExecuteStepsInfo info)
         {
-            migrationMapping = migrationMapping ?? new Dictionary<string, string>();
+            var att = info.CurrentAttribute;
+            var newAttributeSchemaName = info.NewAttributeName;
+            var stepsToPerform = info.Steps;
+            var actions = info.Action;
+            var newAttributeType = info.NewAttribute;
+            var migrationMapping = GetMigrationMapping(info.MappingFilePath) ?? new Dictionary<string, string>();
             var state = GetApplicationMigrationState(Service, att, newAttributeSchemaName);
             AssertValidStepsForState(att.SchemaName, newAttributeSchemaName, stepsToPerform, state, actions);
             var oldAtt = state.Old;
@@ -81,7 +99,7 @@ namespace DLaB.AttributeManager
             switch (actions)
             {
                 case Action.Delete:
-                    ClearFieldDependencies(oldAtt);
+                    ClearFieldDependencies(oldAtt, info.AutoRemovePluginRegistrationAssociations);
                     RemoveExisting(stepsToPerform, oldAtt);
                     break;
 
@@ -92,7 +110,8 @@ namespace DLaB.AttributeManager
                 case Action.Rename:
                 case Action.Rename | Action.ChangeType:
                     CreateNew(newAttributeSchemaName, stepsToPerform, oldAtt, ref newAtt, newAttributeType); // Create or Retrieve the New Attribute
-                    MigrateToNew(stepsToPerform, oldAtt, newAtt, actions, migrationMapping);
+                    MigrateDataToNew(stepsToPerform, oldAtt, newAtt, actions, migrationMapping);
+                    MigrateToNew(stepsToPerform, oldAtt, newAtt);
                     RemoveExisting(stepsToPerform, oldAtt);
                     break;
 
@@ -100,25 +119,73 @@ namespace DLaB.AttributeManager
                 case Action.ChangeCase | Action.ChangeType:
                 case Action.ChangeType:
                     CreateTemp(stepsToPerform, oldAtt, ref tmpAtt, newAttributeType); // Either Create or Retrieve the Temp
-                    MigrateToTemp(stepsToPerform, oldAtt, tmpAtt, actions, migrationMapping);
+                    MigrateDataToTemp(stepsToPerform, oldAtt, tmpAtt, actions, migrationMapping);
+                    MigrateToTemp(stepsToPerform, oldAtt, tmpAtt);
                     RemoveExisting(stepsToPerform, oldAtt);
                     CreateNew(newAttributeSchemaName, stepsToPerform, tmpAtt, ref newAtt, newAttributeType);
-                    MigrateToNew(stepsToPerform, tmpAtt, newAtt, actions, migrationMapping);
+                    MigrateDataToNew(stepsToPerform, tmpAtt, newAtt, actions, migrationMapping);
+                    MigrateToNew(stepsToPerform, tmpAtt, newAtt);
                     RemoveTemp(stepsToPerform, tmpAtt);
                     break;
             }
         }
 
-        private void ClearFieldDependencies(AttributeMetadata att)
+        private Dictionary<string, string> GetMigrationMapping(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return null;
+            }
+            if (!System.IO.File.Exists(path))
+            {
+                MessageBox.Show(@"Mapping file: ""{path}"" was not found!  No Mapping will be performed!",
+                    @"No Mapping File",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return null;
+            }
+
+            var mapping = new Dictionary<string, string>();
+            using (var parser = new TextFieldParser(path))
+            {
+                parser.TextFieldType = FieldType.Delimited;
+                parser.SetDelimiters(",");
+                var line = 0;
+                while (!parser.EndOfData)
+                {
+                    line++;
+                    //Processing row
+                    var fields = parser.ReadFields();
+                    if (fields == null || fields.Length == 0)
+                    {
+                        continue;
+                    }
+                    if (fields.Length != 2)
+                    {
+                        throw new Exception($@"Error parsing file: ""{path}"" on line {line}.  Expected 2 values per line, found {fields.Length}.");
+                    }
+
+                    mapping.Add(fields[0], fields[1]);
+                }
+            }
+            return mapping;
+        }
+
+        private void ClearFieldDependencies(AttributeMetadata att, bool removePluginRegistrationAssociations)
         {
             Trace("Beginning Step: Clearing Field Dependencies");
             UpdateCharts(Service, att);
             UpdateViews(Service, att);
             UpdateForms(Service, att);
+            if (removePluginRegistrationAssociations)
+            {
+                UpdatePluginSteps(Service, att);
+                UpdatePluginImages(Service, att);
+            }
             UpdateRelationships(Service, att);
             UpdateMappings(Service, att);
             UpdateWorkflows(Service, att);
-            PublishEntity(Service, att.EntityLogicalName);
+            PublishAll(Service);
             AssertCanDelete(Service, att);
             Trace("Completed Step: Clearing Field Dependencies" + Environment.NewLine);
         }
@@ -143,12 +210,22 @@ namespace DLaB.AttributeManager
             }
         }
 
-        private void MigrateToNew(Steps stepsToPerform, AttributeMetadata tmpAtt, AttributeMetadata newAtt, Action actions, Dictionary<string, string> migrationMapping)
+        private void MigrateDataToNew(Steps stepsToPerform, AttributeMetadata tmpAtt, AttributeMetadata newAtt, Action actions, Dictionary<string, string> migrationMapping)
+        {
+            if (stepsToPerform.HasFlag(Steps.MigrateDataToNewAttribute))
+            {
+                Trace("Beginning Step: Migrate Data To New Attribute");
+                CopyData(Service, tmpAtt, newAtt, actions, migrationMapping);
+                Trace("Completed Step: Migrate Data To New Attribute" + Environment.NewLine);
+            }
+        }
+
+        private void MigrateToNew(Steps stepsToPerform, AttributeMetadata tmpAtt, AttributeMetadata newAtt)
         {
             if (stepsToPerform.HasFlag(Steps.MigrateToNewAttribute))
             {
                 Trace("Beginning Step: Migrate To New Attribute");
-                MigrateAttribute(tmpAtt, newAtt, actions, migrationMapping);
+                MigrateAttribute(tmpAtt, newAtt);
                 Trace("Completed Step: Migrate To New Attribute" + Environment.NewLine);
             }
         }
@@ -173,20 +250,29 @@ namespace DLaB.AttributeManager
             }
         }
 
-        private void MigrateToTemp(Steps stepsToPerform, AttributeMetadata oldAtt, AttributeMetadata tmpAtt, Action actions, Dictionary<string, string> migrationMapping)
+        private void MigrateDataToTemp(Steps stepsToPerform, AttributeMetadata oldAtt, AttributeMetadata tmpAtt, Action actions, Dictionary<string, string> migrationMapping)
+        {
+            if (stepsToPerform.HasFlag(Steps.MigrateDataToTemp))
+            {
+                Trace("Beginning Step: Migrate Data To Temp");
+                CopyData(Service, oldAtt, tmpAtt, actions, migrationMapping);
+                Trace("Completed Step: Migrate Data To Temp" + Environment.NewLine);
+            }
+        }
+
+        private void MigrateToTemp(Steps stepsToPerform, AttributeMetadata oldAtt, AttributeMetadata tmpAtt)
         {
             if (stepsToPerform.HasFlag(Steps.MigrateToTemp))
             {
                 Trace("Beginning Step: Migrate To Temp");
-                MigrateAttribute(oldAtt, tmpAtt, actions, migrationMapping);
+                MigrateAttribute(oldAtt, tmpAtt);
                 Trace("Completed Step: Migrate To Temp" + Environment.NewLine);
             }
         }
 
-        private void MigrateAttribute(AttributeMetadata fromAtt, AttributeMetadata toAtt, Action actions, Dictionary<string,string> migrationMapping)
+        private void MigrateAttribute(AttributeMetadata fromAtt, AttributeMetadata toAtt)
         {
             // Replace Old Attribute with Tmp Attribute
-            CopyData(Service, fromAtt, toAtt, actions, migrationMapping);
             UpdateCalculatedFields(Service, fromAtt, toAtt);
             UpdateCharts(Service, fromAtt, toAtt);
             UpdateViews(Service, fromAtt, toAtt);
@@ -194,7 +280,7 @@ namespace DLaB.AttributeManager
             UpdateWorkflows(Service, fromAtt, toAtt);
             UpdatePluginStepFilters(Service, fromAtt, toAtt);
             UpdatePluginStepImages(Service, fromAtt, toAtt);
-            PublishEntity(Service, fromAtt.EntityLogicalName);
+            PublishAll(Service);
             AssertCanDelete(Service, fromAtt);
         }
 
@@ -219,7 +305,19 @@ namespace DLaB.AttributeManager
             state.New = metadata.Attributes.FirstOrDefault(a => a.SchemaName == newSchemaName);
             Trace("New Attribute {0}.{1} {2}found", entityName, newSchemaName, state.New == null ? "not " : string.Empty);
 
+            SetDisplayName(state.Old, att.DisplayName);
+            SetDisplayName(state.Temp, att.DisplayName);
+            SetDisplayName(state.New, att.DisplayName);
+
             return state;
+        }
+
+        private void SetDisplayName(AttributeMetadata att, Label displayName)
+        {
+            if (att != null)
+            {
+                att.DisplayName = displayName;
+            }
         }
 
         private void AssertValidStepsForState(string existingSchemaName, string newSchemaName, Steps stepsToPerform, AttributeMigrationState state, Action actions)
@@ -236,7 +334,10 @@ namespace DLaB.AttributeManager
                 }
                 else if (state.Old.GetType() == state.Temp.GetType())
                 {
-                    if (stepsToPerform.HasFlag(Steps.RemoveExistingAttribute) || stepsToPerform.HasFlag(Steps.CreateNewAttribute) || stepsToPerform.HasFlag(Steps.MigrateToTemp))
+                    if (stepsToPerform.HasFlag(Steps.RemoveExistingAttribute) 
+                        || stepsToPerform.HasFlag(Steps.CreateNewAttribute)
+                        || stepsToPerform.HasFlag(Steps.MigrateDataToTemp)
+                        || stepsToPerform.HasFlag(Steps.MigrateToTemp))
                     {
                         Trace("A Temporary Attribute was found and a request has been made to either remove the existing attribute, create a new attribute, or migrate to temp.  Treating New as not yet created.");
                         state.New = null;
@@ -261,7 +362,7 @@ namespace DLaB.AttributeManager
                 throw new InvalidOperationException("Unable to Create Temp!  Temp " + state.Temp.EntityLogicalName + "." + state.Temp.LogicalName + " already exists!");
             }
 
-            if (stepsToPerform.HasFlag(Steps.MigrateToTemp))
+            if (stepsToPerform.HasFlag(Steps.MigrateDataToTemp) || stepsToPerform.HasFlag(Steps.MigrateToTemp))
             {
                 // Can only Migrate if old already exists
                 if (state.Old == null)
@@ -331,7 +432,7 @@ namespace DLaB.AttributeManager
                 }
             }
 
-            if (stepsToPerform.HasFlag(Steps.MigrateToNewAttribute))
+            if (stepsToPerform.HasFlag(Steps.MigrateDataToNewAttribute) || stepsToPerform.HasFlag(Steps.MigrateToNewAttribute))
             {
                 // Can only Migrate To New if Temp Exists, or Creating a Temp, or There is a Rename and the Old Already Exists
                 if (!(state.Temp != null || stepsToPerform.HasFlag(Steps.CreateTemp) || (actions.HasFlag(Action.Rename) && state.Old != null)))
@@ -420,7 +521,17 @@ namespace DLaB.AttributeManager
                         var response =
                             (RetrieveRelationshipResponse)service.Execute(new RetrieveRelationshipRequest { MetadataId = dependentId });
                         Trace("Entity Relationship / Mapping {0} must be manually removed/added", response.RelationshipMetadata.SchemaName);
+                        break;
 
+                    case ComponentType.SDKMessageProcessingStep:
+                        var step = service.GetEntity<SdkMessageProcessingStep>(dependentId);
+                        err = $"{type} {step.Name}({dependentId}) - {step.Description}";
+                        break;
+
+                    case ComponentType.SDKMessageProcessingStepImage:
+                        var image = service.GetEntity<SdkMessageProcessingStepImage>(dependentId);
+                        var imageStep = service.GetEntity<SdkMessageProcessingStep>(image.SdkMessageProcessingStepId.Id);
+                        err = $"{type} {imageStep.Name}.{image.Name}({dependentId}) - {image.ImageTypeEnum}";
                         break;
 
                     case ComponentType.SavedQueryVisualization:
@@ -669,18 +780,8 @@ namespace DLaB.AttributeManager
 
         private void UpdatePluginStepFilters(IOrganizationService service, AttributeMetadata att, AttributeMetadata to)
         {
-            var qe = QueryExpressionFactory.Create<SdkMessageProcessingStep>();
-            qe.AddLink<SdkMessageFilter>(SdkMessageFilter.Fields.SdkMessageFilterId)
-                .WhereEqual(SdkMessageFilter.Fields.PrimaryObjectTypeCode, att.EntityLogicalName);
-            AddConditionsForValueInCsv(qe.Criteria, SdkMessageProcessingStep.Fields.FilteringAttributes, att.LogicalName);
-            qe.WhereIn(SdkMessageProcessingStep.Fields.Stage,
-                (int)SdkMessageProcessingStep_Stage.Postoperation,
-                (int)SdkMessageProcessingStep_Stage.Preoperation,
-                (int)SdkMessageProcessingStep_Stage.Prevalidation);
-
-            Trace("Checking for Plugin Registration Step Filtering Attribute Dependencies with Query: " + qe.GetSqlStatement());
-
-            foreach (var step in service.GetEntities(qe))
+            var steps = GetPluginStepsContainingAtt(service, att);
+            foreach (var step in steps)
             {
                 var filter = ReplaceCsvValues(step.FilteringAttributes, att.LogicalName, to.LogicalName);
                 Trace("Updating {0} - \"{1}\" to \"{2}\"", step.Name, step.FilteringAttributes, filter);
@@ -692,6 +793,23 @@ namespace DLaB.AttributeManager
             }
         }
 
+        private List<SdkMessageProcessingStep> GetPluginStepsContainingAtt(IOrganizationService service, AttributeMetadata att)
+        {
+            var qe = QueryExpressionFactory.Create<SdkMessageProcessingStep>();
+            qe.AddLink<SdkMessageFilter>(SdkMessageFilter.Fields.SdkMessageFilterId)
+                .WhereEqual(SdkMessageFilter.Fields.PrimaryObjectTypeCode, att.EntityLogicalName);
+            AddConditionsForValueInCsv(qe.Criteria, SdkMessageProcessingStep.Fields.FilteringAttributes, att.LogicalName);
+            qe.WhereIn(
+                SdkMessageProcessingStep.Fields.Stage,
+                (int) SdkMessageProcessingStep_Stage.Postoperation,
+                (int) SdkMessageProcessingStep_Stage.Preoperation,
+                (int) SdkMessageProcessingStep_Stage.Prevalidation);
+
+            Trace("Checking for Plugin Registration Step Filtering Attribute Dependencies with Query: " + qe.GetSqlStatement());
+
+            return service.GetEntities(qe);
+        }
+
         private static void AddConditionsForValueInCsv(FilterExpression filter, string fieldName, string value)
         {
             filter.WhereEqual(
@@ -701,7 +819,7 @@ namespace DLaB.AttributeManager
                 LogicalOperator.Or,
                 new ConditionExpression(fieldName, ConditionOperator.Like, $"%,{value}"),
                 LogicalOperator.Or,
-                fieldName, "{0}"
+                fieldName, value
                 );
         }
 
@@ -725,15 +843,8 @@ namespace DLaB.AttributeManager
 
         private void UpdatePluginStepImages(IOrganizationService service, AttributeMetadata att, AttributeMetadata to)
         {
-            var qe = QueryExpressionFactory.Create<SdkMessageProcessingStepImage>();
-            qe.AddLink<SdkMessageProcessingStep>(SdkMessageProcessingStepImage.Fields.SdkMessageProcessingStepId)
-                .AddLink<SdkMessageFilter>(SdkMessageProcessingStep.Fields.SdkMessageFilterId)
-                .WhereEqual(SdkMessageFilter.Fields.PrimaryObjectTypeCode, att.EntityLogicalName);
-            AddConditionsForValueInCsv(qe.Criteria, SdkMessageProcessingStepImage.Fields.Attributes1, att.LogicalName);
-
-            Trace("Checking for Plugin Registration Step Images Attribute Dependencies with Query: " + qe.GetSqlStatement());
-
-            foreach (var step in service.GetEntities(qe))
+            var steps = GetPluginImagesContainingAtt(service, att);
+            foreach (var step in steps)
             {
                 var filter = ReplaceCsvValues(step.Attributes1, att.LogicalName, to.LogicalName);
                 Trace("Updating {0} - \"{1}\" to \"{2}\"", step.Name, step.Attributes1, filter);
@@ -743,6 +854,18 @@ namespace DLaB.AttributeManager
                     Attributes1 = filter
                 });
             }
+        }
+
+        private List<SdkMessageProcessingStepImage> GetPluginImagesContainingAtt(IOrganizationService service, AttributeMetadata att)
+        {
+            var qe = QueryExpressionFactory.Create<SdkMessageProcessingStepImage>();
+            qe.AddLink<SdkMessageProcessingStep>(SdkMessageProcessingStepImage.Fields.SdkMessageProcessingStepId)
+                .AddLink<SdkMessageFilter>(SdkMessageProcessingStep.Fields.SdkMessageFilterId)
+                .WhereEqual(SdkMessageFilter.Fields.PrimaryObjectTypeCode, att.EntityLogicalName);
+            AddConditionsForValueInCsv(qe.Criteria, SdkMessageProcessingStepImage.Fields.Attributes1, att.LogicalName);
+
+            Trace("Checking for Plugin Registration Step Images Attribute Dependencies with Query: " + qe.GetSqlStatement());
+            return service.GetEntities(qe);
         }
 
         private void UpdateWorkflows(IOrganizationService service, AttributeMetadata att, AttributeMetadata to)
@@ -854,20 +977,22 @@ namespace DLaB.AttributeManager
 
         private void UpdateViews(IOrganizationService service, AttributeMetadata from, AttributeMetadata to)
         {
-            foreach (var query in GetViewsWithAttribute(service, from))
+            foreach (var query in GetViewsWithAttribute(service, from)
+                .Union(GetUserViewsWithAttribute(service, from)))
             {
-                Trace("Updating View " + query.Name);
-                query.FetchXml = ReplaceFetchXmlAttribute(query.FetchXml, from.LogicalName, to.LogicalName);
+                Trace($"Updating {query.LogicalName} {query.Name} {query.Id}");
+                var toUpdate = query.CreateForUpdate();
+                toUpdate.FetchXml = ReplaceFetchXmlAttribute(query.FetchXml, from.LogicalName, to.LogicalName);
 
                 if (query.LayoutXml != null)
                 {
-                    query.LayoutXml = ReplaceFetchXmlAttribute(query.LayoutXml, from.LogicalName, to.LogicalName, true);
+                    toUpdate.LayoutXml = ReplaceFetchXmlAttribute(query.LayoutXml, from.LogicalName, to.LogicalName, true);
                 }
-                service.Update(query);
+                service.Update((Entity)toUpdate);
             }
         }
 
-        private List<SavedQuery> GetViewsWithAttribute(IOrganizationService service, AttributeMetadata @from)
+        private IEnumerable<IQuery> GetViewsWithAttribute(IOrganizationService service, AttributeMetadata from)
         {
             var qe = QueryExpressionFactory.Create<SavedQuery>(q => new
             {
@@ -878,11 +1003,28 @@ namespace DLaB.AttributeManager
                 q.LayoutXml
             });
 
-            AddFetchXmlCriteria(qe, SavedQuery.Fields.FetchXml, @from.EntityLogicalName, @from.LogicalName);
+            AddFetchXmlCriteria(qe, SavedQuery.Fields.FetchXml, from.EntityLogicalName, from.LogicalName);
 
             Trace("Retrieving Views with Query: " + qe.GetSqlStatement());
-            var views = service.GetEntities(qe);
-            return views;
+           
+            return service.GetEntities(qe);
+        }
+
+        private IEnumerable<IQuery> GetUserViewsWithAttribute(IOrganizationService service, AttributeMetadata from)
+        {
+            var qe = QueryExpressionFactory.Create<UserQuery>(q => new
+            {
+                q.Id,
+                q.Name,
+                q.QueryType,
+                q.FetchXml,
+                q.LayoutXml
+            });
+
+            AddFetchXmlCriteria(qe, UserQuery.Fields.FetchXml, from.EntityLogicalName, from.LogicalName);
+
+            Trace("Retrieving User Views with Query: " + qe.GetSqlStatement());
+            return service.GetEntities(qe);
         }
 
         private string ReplaceFetchXmlAttribute(string xml, string from, string to, bool nameOnly = false)
@@ -898,9 +1040,15 @@ namespace DLaB.AttributeManager
         private static void AddFetchXmlCriteria(QueryExpression qe, string fieldName, string entityName, string attributeName)
         {
             qe.WhereEqual(
-                new ConditionExpression(fieldName, ConditionOperator.Like, $"%<entity name=\"{entityName}\">%name=\"{attributeName}\"%</entity>%"), 
-                LogicalOperator.Or, 
-                new ConditionExpression(fieldName, ConditionOperator.Like, $"%<entity name=\"{entityName}\">%attribute=\"{attributeName}\"%</entity>%"));
+                // Look for fetch xml that has the given entity and attribute with the entity as the main entity of the fetch. 
+                new ConditionExpression(fieldName, ConditionOperator.Like, $"%<entity%name=\"{entityName}\">%name=\"{attributeName}\"%</entity>%"),
+                LogicalOperator.Or,
+                new ConditionExpression(fieldName, ConditionOperator.Like, $"%<entity%name=\"{entityName}\">%attribute=\"{attributeName}\"%</entity>%"),
+                LogicalOperator.Or,
+                // Look for fetch Xml that ahs the given entity and attribute as a link entity
+                new ConditionExpression(fieldName, ConditionOperator.Like, $"%<link-entity%name=\"{entityName}\"%>%name=\"{attributeName}\"%>%</link-entity>%"),
+                LogicalOperator.Or,
+                new ConditionExpression(fieldName, ConditionOperator.Like, $"%<link-entity%name=\"{entityName}\"%>%attribute=\"{attributeName}\"%>%</link-entity>%"));
 
         }
 
@@ -925,7 +1073,8 @@ namespace DLaB.AttributeManager
                 LogicalOperator.Or,
                 new ConditionExpression(from.LogicalName, ConditionOperator.Null),
                 new ConditionExpression(to.LogicalName, ConditionOperator.NotNull));
-            
+
+            int updatesSuccess = 0;
             // Grab from and to, and only update if not equal.  This is to speed things up if it has failed part way through
             foreach (var entity in service.GetAllEntities<Entity>(qe))
             {
@@ -933,7 +1082,7 @@ namespace DLaB.AttributeManager
                 {
                     if (requests.Any())
                     {
-                        PerformUpdates(service, requests);
+                        updatesSuccess = updatesSuccess + PerformUpdates(service, requests);
                     }
 
                     Trace("Copying {0} / {1}", count, total);
@@ -979,28 +1128,33 @@ namespace DLaB.AttributeManager
 
             if (requests.Any())
             {
-                PerformUpdates(service, requests);
+                updatesSuccess = updatesSuccess + PerformUpdates(service, requests);
             }
 
             watch.Stop();
-            Trace("Data Migration Complete.  Total {0} records in {1} seconds.", total, watch.ElapsedMilliseconds / 1000);
+            Trace("Data Migration Complete. Total {0} records processed in {1} seconds.", total, watch.ElapsedMilliseconds / 1000);
+            if (IgnoreUpdateErrors)
+            {
+                Trace("{0} updated sucessfully", updatesSuccess);
+            }
         }
 
-        private void PerformUpdates(IOrganizationService service, OrganizationRequestCollection requests)
+        private int PerformUpdates(IOrganizationService service, OrganizationRequestCollection requests)
         {
+            int countFaults = 0;
             if (SupportsExecuteMultipleRequest)
             {
                 var response = (ExecuteMultipleResponse) service.Execute(new ExecuteMultipleRequest
                 {
                     Settings = new ExecuteMultipleSettings
                     {
-                        ContinueOnError = false,
-                        ReturnResponses = false
+                        ContinueOnError = IgnoreUpdateErrors,
+                        ReturnResponses = IgnoreUpdateErrors
                     },
                     Requests = requests
                 });
 
-                if (response.IsFaulted)
+                if (response.IsFaulted && !IgnoreUpdateErrors)
                 {
                     var fault = response.Responses.First().Fault;
                     while (fault.InnerFault != null)
@@ -1018,14 +1172,33 @@ namespace DLaB.AttributeManager
 
                     throw new Exception(fault.Message + errorDetails);
                 }
+                else
+                {
+                    var faultResponses = response.Responses.Where(r => r.Fault != null);
+                    countFaults = faultResponses.Count();
+                }
             }
             else
             {
                 foreach (var request in requests)
                 {
-                    service.Update(((UpdateRequest) request).Target);
+                    try
+                    {
+                        service.Update(((UpdateRequest)request).Target);
+                    } catch
+                    {
+                        if (IgnoreUpdateErrors)
+                        {
+                            countFaults = countFaults + 1;
+                        }
+                        else
+                        {
+                            throw;
+                        }
+                    }
                 }
             }
+            return requests.Count() - countFaults;
         }
 
         private int GetRecordCount(IOrganizationService service, AttributeMetadata from)
@@ -1079,7 +1252,7 @@ namespace DLaB.AttributeManager
                 Trace("Error Creating Attribute " + existingAtt.EntityLogicalName + "." + newSchemaName);
                 throw;
             }
-
+            
             PublishEntity(service, existingAtt.EntityLogicalName);
 
             return clone;
@@ -1112,7 +1285,7 @@ namespace DLaB.AttributeManager
         private void SetEntityLogicalName(AttributeMetadata att, string entityLogicalName)
         {
             var prop = att.GetType().GetProperty("EntityLogicalName");
-            prop.SetValue(att, entityLogicalName);
+            prop?.SetValue(att, entityLogicalName);
         }
 
         private void PublishEntity(IOrganizationService service, string logicalName)
@@ -1120,20 +1293,26 @@ namespace DLaB.AttributeManager
             Trace("Publishing Entity " + logicalName);
             service.Execute(new PublishXmlRequest
             {
-                ParameterXml = "<importexportxml>" + "    <entities>" + "        <entity>" + logicalName + "</entity>" + "    </entities>" + "</importexportxml>"
+                ParameterXml = $"<importexportxml><entities><entity>{logicalName}</entity></entities></importexportxml>"
             });
+        }
+
+        private void PublishAll(IOrganizationService service)
+        {
+            Trace("Publishing All");
+            service.Execute(new PublishAllXmlRequest());
         }
 
         private void Trace(string message)
         {
             Debug.Assert(OnLog != null, "OnLog != null");
-            OnLog(message);
+            OnLog?.Invoke(message);
         }
 
         private void Trace(string messageFormat, params object[] args)
         {
             Debug.Assert(OnLog != null, "OnLog != null");
-            OnLog(string.Format(messageFormat, args));
+            OnLog?.Invoke(string.Format(messageFormat, args));
         }
 
         private class AttributeMigrationState

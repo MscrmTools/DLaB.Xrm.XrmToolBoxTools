@@ -2,10 +2,11 @@
 using System.Collections;
 using System.Windows.Forms;
 
+
 namespace DLaB.XrmToolboxCommon
 {
     /// <summary>
-    /// Compares two listview items for sorting
+    /// Compares two list view items for sorting
     /// </summary>
     public class ListViewItemComparer : IComparer
     {

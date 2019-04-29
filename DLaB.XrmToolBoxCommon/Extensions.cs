@@ -7,11 +7,13 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Windows.Forms;
+using DLaB.Log;
 using McTools.Xrm.Connection;
 using Microsoft.Xrm.Sdk.Metadata;
-using DLaB.Xrm;
+using Source.DLaB.Xrm;
+using XrmToolBox.Extensibility;
 
-namespace DLaB.XrmToolboxCommon
+namespace DLaB.XrmToolBoxCommon
 {
     public static class Extensions
     {
@@ -130,7 +132,7 @@ namespace DLaB.XrmToolboxCommon
             }
         }
 
-        public static void SetXmlFilePath(this OpenFileDialog dialog, TextBox textBox, string rootPath = null)
+        public static bool SetXmlFilePath(this OpenFileDialog dialog, TextBox textBox, string rootPath = null)
         {
             dialog.DefaultExt = "xml";
             dialog.Filter = @"Xml files|*.xml";
@@ -138,9 +140,59 @@ namespace DLaB.XrmToolboxCommon
             if (dialog.ShowDialog() == DialogResult.OK)
             {
                 textBox.Text = dialog.FileName;
+                return true;
             }
+
+            return false;
         }
 
         #endregion OpenFileDialog
+
+        #region WorkAsyncInfo
+
+        public static WorkAsyncInfo WithLogger(this WorkAsyncInfo info, PluginControlBase plugin, TextBox output, object asyncArgument = null, string successMessage = "Finished Successfully!", int? successPercent = 99)
+        {
+            plugin.Enabled = false;
+            var oldWork = info.Work;
+            info.Work = (w, args) =>
+            {
+                Logger.WireUpToReportProgress(w);
+                try
+                {
+                    oldWork(w, args);
+                    if (successPercent.HasValue)
+                    {
+                        w.ReportProgress(successPercent.Value, successMessage);
+                    }
+                    else
+                    {
+                        plugin.Enabled = true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    w.ReportProgress(int.MinValue, ex.ToString());
+                }
+                finally
+                {
+                    Logger.UnwireFromReportProgress(w);
+                }
+
+            };
+            info.AsyncArgument = asyncArgument;
+
+            info.PostWorkCallBack = e => // Creation has finished.  Cleanup
+            {
+                Logger.DisplayLog(e, output);
+                plugin.Enabled = true;
+            };
+            info.ProgressChanged = e => // Logic wants to display an update
+            {
+                Logger.DisplayLog(e, plugin.SetWorkingMessage, output);
+            };
+            return info;
+        }
+
+        #endregion WorkAsyncInfo
     }
 }

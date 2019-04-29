@@ -2,72 +2,68 @@
 <package >
   <metadata>
     <id>DLaB.Xrm.EarlyBoundGenerator</id>
-	  <version>1.2017.10.10</version>
+	  <version>1.2019.3.19</version>
 	  <title>Early Bound Generator</title>
     <authors>Daryl LaBar</authors>
     <owners>Daryl LaBar</owners>
-    <licenseUrl>https://github.com/daryllabar/DLaB.Xrm.XrmToolBoxTools/blob/master/LICENSE</licenseUrl>
+    <license type="expression">MIT</license>
     <projectUrl>https://github.com/daryllabar/DLaB.Xrm.XrmToolBoxTools</projectUrl>
     <iconUrl>https://raw.githubusercontent.com/daryllabar/DLaB.Xrm.XrmToolBoxTools/master/DLaB.XrmToolBoxCommon/Images/DLaB_Dynamics_Logo_Square_32x32.png</iconUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <description>Generates Early Bound Entities/Option Sets/Actions.  Uses CrmSvcUtil from the SDK, and shows command line used to create the classes.</description>
-    <releaseNotes>V1.2017.10.10
- - Fixed Cannot save Entities to skip #130
+    <releaseNotes>V1.2019.3.19
+Fixed bug for MFA
       
- V1.2017.10.2
- - Fixed Null Ref Error is thrown on Generate #129
- 
- V1.2017.8.7
- - Added Support VS 2017 Install #116
- - Fixed Entity and OptionSet Could Have the Same Exact Name #1 also Error on generating Entities bug #119
- - Fixed Error on generating Entities bug #119
+V1.2019.3.17
+Updated CrmSvcUtil
 
-V1.2017.7.23
- - Fix Exception When Run #115 Null Ref Errors
- 
- V1.2017.7.19
- - Implmented Add Fields Class to Custom Actions #114
- 
- V1.2017.7.18
- - Fix for Enum method being generated for skipped OptionSet #110
- - Implmented Custom Action Responses Editable #111
- - Implmented Add primary name attribute to early bound entity class #96
- 
- V1.2017.6.14
- - Fix for Error in format of Transliteration file #105
- - Fix for Generated Account.cs Entity cannot find AccountState (StateCodeEnum) #48
- - Fix for Reading from Cached Metadata causing Null Ref
- 
- V1.2017.4.9
- - Implmented Change Field Type to Static Class #82
+V1.2019.3.12
+Fix for Unable to generate files with latest version installed via XrmToolBox #177
 
-V1.2017.3.23
- - Fix for OptionSet Attributes Are Getting Generated as Objects Not OptionSetValues #87
- - Fix for Missing References to Xrm.Tooling.Ui #92
-
-V1.2017.3.3
- - Worked with Microsoft to get the correct version of the CrmSvcUtil from Nuget.  Should fix #84.
+V1.2019.3.11
+Added Extension for "Make readonly fields editable" #174
       
-V1.2017.1.31
- - Fixed new similar bug created in 1.30 to address DLaB.EarlyBoundGenerator.Settings.xml isn't generated #83
- - Updated Default Location for Settings Path to be in the Settings Directory
- 
-V1.2017.1.30
- - Fixed DLaB.EarlyBoundGenerator.Settings.xml isn't generated #83
+V1.2019.2.12
+Fixed Multi-Select OptionSets aren't being created! #176
 
-V1.2017.1.5
- - Fixed TFS Get/Checkout command errors if longer than 32000 #77
- - Fixed If EBG Config file is readonly it fails to read the settings #76
+V1.2019.1.25
+Replace UI with PropertyGrid #173
+Added ability to select publisher prefix to skip #38
+Added WhiteList for Entities #172
+Added logic to only generate OptionSets if referenced by Entities #36
+Prevent specifying the namespace and xrmContext from being the same value. #157
+
+V1.2018.10.15
+Upgrade to 9.0.2.5 SDK
+
+V1.2018.9.12
+Updated to latest version of the Xrm Sdk
+Allow for Multi-Select OptionSets - #136
+Added config for setting a Debug
+
+V1.2018.5.2
+Fix for EBG doesn't add files correctly to empty shared project #155
+
+V1.2018.4.11
+Fix for strong password in Command line sometimes not detected correctly #148
+Fix for Bug with Allow for Overriding Enum Language Code #150
+incorporated PR #151   
+
+V1.2018.4.11
+ - Fix for strong password in Command line sometimes not detected correctly #148
+
+V1.2018.4.10
+ - Allow for Overriding Enum Language Code #150
     </releaseNotes>
-    <copyright>Copyright 2016</copyright>
+    <copyright>Copyright 2018</copyright>
     <tags>XrmToolBox Plugins Xrm</tags>
     <dependencies>
       <dependency id="XrmToolBox" version="1.2017.2.13" />
     </dependencies>
   </metadata>
   <files>
-    <file src="bin\Release\MscrmTools\XrmToolBox\Plugins\DLaB.EarlyBoundGenerator.dll" target="lib\net452\plugins" />
-    <file src="bin\Release\MscrmTools\XrmToolBox\Plugins\CrmSvcUtil Ref\*.*" target="lib\net452\plugins\CrmSvcUtil Ref" />
-	  <file src="bin\Release\MscrmTools\XrmToolBox\Plugins\CrmSvcUtil Ref\alphabets\*.*" target="lib\net452\plugins\CrmSvcUtil Ref\alphabets" />
+    <file src="bin\Release\MscrmTools\XrmToolBox\Plugins\DLaB.EarlyBoundGenerator.dll" target="lib\net462\plugins" />
+    <file src="bin\Release\MscrmTools\XrmToolBox\Plugins\DLaB.EarlyBoundGenerator\*.*" target="lib\net462\plugins\DLaB.EarlyBoundGenerator" />
+	  <file src="bin\Release\MscrmTools\XrmToolBox\Plugins\DLaB.EarlyBoundGenerator\alphabets\*.*" target="lib\net462\plugins\DLaB.EarlyBoundGenerator\alphabets" />
   </files>
 </package>

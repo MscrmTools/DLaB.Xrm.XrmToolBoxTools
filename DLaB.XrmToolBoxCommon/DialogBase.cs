@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Windows.Forms;
-using DLaB.Xrm;
+using Source.DLaB.Xrm;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Metadata;
@@ -9,7 +9,7 @@ using Microsoft.Xrm.Sdk.Query;
 using XrmToolBox.Extensibility;
 using XrmToolBox.Extensibility.Interfaces;
 
-namespace DLaB.XrmToolboxCommon
+namespace DLaB.XrmToolBoxCommon
 {
     public partial class DialogBase : Form, IWorkerHost
     {

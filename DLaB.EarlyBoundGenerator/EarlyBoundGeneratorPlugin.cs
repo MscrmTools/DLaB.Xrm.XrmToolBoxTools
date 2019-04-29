@@ -2,15 +2,17 @@
 using System.Collections.Generic;
 using System.ComponentModel.Composition;
 using System.IO;
+using System.Linq;
 using System.Windows.Forms;
 using DLaB.EarlyBoundGenerator.Settings;
-using DLaB.XrmToolboxCommon;
+using DLaB.Log;
+using DLaB.XrmToolBoxCommon;
 using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Client;
 using Microsoft.Xrm.Sdk.Metadata;
 using XrmToolBox.Extensibility;
 using XrmToolBox.Extensibility.Interfaces;
-using PropertyInterface = DLaB.XrmToolboxCommon.PropertyInterface;
+using PropertyInterface = DLaB.XrmToolBoxCommon.PropertyInterface;
 
 namespace DLaB.EarlyBoundGenerator
 {
@@ -18,11 +20,13 @@ namespace DLaB.EarlyBoundGenerator
     {
         public EarlyBoundGeneratorConfig Settings { get; set; }
         public IEnumerable<Entity> Actions { get; set; }
+        // ReSharper disable once IdentifierTypo
         public IEnumerable<EntityMetadata> EntityMetadatas { get; set; }
         public IEnumerable<OptionSetMetadataBase> GlobalOptionSets { get; set; }
         public ConnectionSettings ConnectionSettings { get; set; }
         private bool SkipSaveSettings { get; set; }
         private bool FormLoaded { get; set; }
+        private SettingsMap SettingsMap { get; set; }
 
         #region XrmToolBox Menu Interfaces
 
@@ -48,16 +52,11 @@ namespace DLaB.EarlyBoundGenerator
             InitializeComponent();
         }
 
-        private void SetAddFilesToProjectVisibility()
-        {
-            ChkAddFilesToProject.Visible = ChkCreateOneActionFile.Checked || ChkCreateOneEntityFile.Checked || ChkCreateOneOptionSetFile.Checked;
-        }
-
         private void EarlyBoundGenerator_Load(object sender, EventArgs e)
         {
             if (ConnectionDetail != null)
             {
-                DisplayActionsIfSupported(false);
+                DisplayActionsIfSupported();
             }
 
             SetConnectionSettingOnLoad();
@@ -70,6 +69,9 @@ namespace DLaB.EarlyBoundGenerator
             try
             {
                 Settings = EarlyBoundGeneratorConfig.Load(settingsPath);
+                Settings.CrmSvcUtilRealtiveRootPath = Paths.PluginsPath;
+                SettingsMap = new SettingsMap(this, Settings){SettingsPath = settingsPath};
+                PropertiesGrid.SelectedObject = SettingsMap;
                 SkipSaveSettings = false;
             }
             catch (Exception ex)
@@ -79,53 +81,18 @@ namespace DLaB.EarlyBoundGenerator
                 if (result == DialogResult.Yes)
                 {
                     Settings = EarlyBoundGeneratorConfig.GetDefault();
-
+                    Settings.CrmSvcUtilRealtiveRootPath = Paths.PluginsPath;
                 }
                 else
                 {
                     SkipSaveSettings = true;
                 }
             }
-
-            ChkAddDebuggerNonUserCode.Checked = Settings.ExtensionConfig.AddDebuggerNonUserCode;
-            ChkAddFilesToProject.Checked = Settings.ExtensionConfig.AddNewFilesToProject;
-            ChkAudibleCompletion.Checked = Settings.AudibleCompletionNotification;
-            ChkCreateOneActionFile.Checked = Settings.ExtensionConfig.CreateOneFilePerAction;
-            ChkCreateOneEntityFile.Checked = Settings.ExtensionConfig.CreateOneFilePerEntity;
-            ChkCreateOneOptionSetFile.Checked = Settings.ExtensionConfig.CreateOneFilePerOptionSet;
-            ChkEditableResponseActions.Checked = Settings.ExtensionConfig.MakeResponseActionsEditable;
-            ChkIncludeCommandLine.Checked = Settings.IncludeCommandLine;
-            ChkMakeReadonlyFieldsEditable.Checked = Settings.ExtensionConfig.MakeReadonlyFieldsEditable;
-            ChkMaskPassword.Checked = Settings.MaskPassword;
-            ChkGenerateActionAttributeNameConsts.Checked = Settings.ExtensionConfig.GenerateActionAttributeNameConsts;
-            ChkGenerateAttributeNameConsts.Checked = Settings.ExtensionConfig.GenerateAttributeNameConsts;
-            ChkGenerateAnonymousTypeConstructor.Checked = Settings.ExtensionConfig.GenerateAnonymousTypeConstructor;
-            ChkGenerateEntityRelationships.Checked = Settings.ExtensionConfig.GenerateEntityRelationships;
-            ChkGenerateOptionSetEnums.Checked = Settings.ExtensionConfig.GenerateEnumProperties;
-            ChkRemoveRuntimeComment.Checked = Settings.ExtensionConfig.RemoveRuntimeVersionComment;
-            ChkUseDeprecatedOptionSetNaming.Checked = Settings.ExtensionConfig.UseDeprecatedOptionSetNaming;
-            ChkUseTFS.Checked = Settings.ExtensionConfig.UseTfsToCheckoutFiles;
-            ChkUseXrmClient.Checked = Settings.ExtensionConfig.UseXrmClient;
-            TxtActionPath.Text = Settings.ActionOutPath;
-            TxtEntityPath.Text = Settings.EntityOutPath;
-            TxtInvalidCSharpNamePrefix.Text = Settings.ExtensionConfig.InvalidCSharpNamePrefix;
-            TxtOptionSetFormat.Text = Settings.ExtensionConfig.LocalOptionSetFormat;
-            TxtNamespace.Text = Settings.Namespace;
-            TxtOptionSetPath.Text = Settings.OptionSetOutPath;
-            TxtServiceContextName.Text = Settings.ServiceContextName;
-
-            // Hide or show labels based on checked preferences
-            LblActionsDirectory.Visible = ChkCreateOneActionFile.Checked;
-            LblActionPath.Visible = !LblActionsDirectory.Visible;
-            LblEntitiesDirectory.Visible = ChkCreateOneEntityFile.Checked;
-            LblEntityPath.Visible = !LblEntitiesDirectory.Visible;
-            LblOptionSetsDirectory.Visible = ChkCreateOneOptionSetFile.Checked;
-            LblOptionSetPath.Visible = !LblOptionSetsDirectory.Visible;
-            SetAddFilesToProjectVisibility();
         }
 
         private void SaveSettings()
         {
+            SettingsMap.PushChanges();
             Settings.Save(ConnectionSettings.SettingsPath);
         }
 
@@ -149,24 +116,26 @@ namespace DLaB.EarlyBoundGenerator
 
         private bool IsFormValid(CreationType creationType)
         {
+            SettingsMap.PushChanges();
             var isValid =
-                IsValidPath(creationType, CreationType.Entities, TxtEntityPath, ChkCreateOneEntityFile, "Entities") &&
-                IsValidPath(creationType, CreationType.Entities, TxtOptionSetPath, ChkCreateOneOptionSetFile, "OptionSets") &&
-                IsValidPath(creationType, CreationType.Entities, TxtActionPath, ChkCreateOneActionFile, "Actions");
+                IsValidPath(creationType, CreationType.Entities, SettingsMap.EntityOutPath, SettingsMap.CreateOneFilePerEntity, "Entities") &&
+                IsValidPath(creationType, CreationType.Entities, SettingsMap.OptionSetOutPath, SettingsMap.CreateOneFilePerOptionSet, "OptionSets") &&
+                IsValidPath(creationType, CreationType.Entities, SettingsMap.ActionOutPath, SettingsMap.CreateOneFilePerAction, "Actions") &&
+                IsNamespaceDifferentThanContext();
 
             return isValid;
         }
 
-        private static bool IsValidPath(CreationType creationType, CreationType creationTypeToCheck, TextBox textPath, CheckBox chk, string name)
+        private static bool IsValidPath(CreationType creationType, CreationType creationTypeToCheck, string path, bool pathIsDirectory, string name)
         {
             if (creationType != creationTypeToCheck && creationType != CreationType.All)
             {
                 return true;
             }
             var isValid = true;
-            var containsExtension = !string.IsNullOrWhiteSpace(Path.GetExtension(textPath.Text));
+            var containsExtension = !string.IsNullOrWhiteSpace(Path.GetExtension(path));
             // Validate Path
-            if (chk.Checked)
+            if (pathIsDirectory)
             {
                 if (containsExtension)
                 {
@@ -185,6 +154,18 @@ namespace DLaB.EarlyBoundGenerator
             return isValid;
         }
 
+        private bool IsNamespaceDifferentThanContext()
+        {
+            var isValid = true;
+            if (Settings.ServiceContextName == Settings.Namespace)
+            {
+                MessageBox.Show(@"The Service Context can not be the same name as the Namespace!", @"Service Context / Namespace Conflict!", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                isValid = false;
+            }
+
+            return isValid;
+        }
+
         public void CreateCode(CreationType creationType)
         {
             EnableForm(false);
@@ -192,7 +173,7 @@ namespace DLaB.EarlyBoundGenerator
             HydrateSettingsFromUI();
             if (new Version(Settings.Version) < new Version(Settings.SettingsVersion))
             {
-                if(MessageBox.Show($@"This version of the Early Bound Generator ({Settings.Version}) is older than the previous ran version from the settings ({Settings.SettingsVersion}).  You should probably update the plugin before running.  Are you sure you want to countinue?", "Older Version detected", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Exclamation) != DialogResult.Yes)
+                if(MessageBox.Show($@"This version of the Early Bound Generator ({Settings.Version}) is older than the previous ran version from the settings ({Settings.SettingsVersion}).  You should probably update the plugin before running.  Are you sure you want to continue?", @"Older Version detected", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Exclamation) != DialogResult.Yes)
                 {
                     EnableForm(true);
                     return;
@@ -209,8 +190,7 @@ namespace DLaB.EarlyBoundGenerator
                     var settings = (EarlyBoundGeneratorConfig) e.Argument;
 
                     var generator = new Logic(settings);
-                    Logic.LogHandler onLog = m => w.ReportProgress(0, m);
-                    generator.OnLog += onLog;
+                    Logger.WireUpToReportProgress(w);
                     try
                     {
                         switch (creationType)
@@ -246,48 +226,19 @@ namespace DLaB.EarlyBoundGenerator
                     }
                     finally
                     {
-                        generator.OnLog -= onLog;
+                        Logger.UnwireFromReportProgress(w);
                     }
                 })
             {
                 AsyncArgument = Settings,
                 PostWorkCallBack = e => // Creation has finished.  Cleanup
                 {
-                    var result = e.Result as Logic.LogMessageInfo;
-                    if (result != null)
-                    {
-                        TxtOutput.AppendText(result.Detail + Environment.NewLine);
-                    }
+                    Logger.DisplayLog(e, TxtOutput);
                     EnableForm(true);
                 },
                 ProgressChanged = e => // Logic wants to display an update
                 {
-                    string summary;
-                    var result = e.UserState as Logic.LogMessageInfo;
-                    if (result == null)
-                    {
-                        summary = e.UserState.ToString();
-                    }
-                    else
-                    {
-                        if (result.Detail != null)
-                        {
-                            TxtOutput.AppendText(result.Detail + Environment.NewLine);
-                        }
-                        summary = result.Summary;
-                    }
-                    // Status Update
-                    if (e.ProgressPercentage == int.MinValue)
-                    {
-                        TxtOutput.AppendText(e.UserState + Environment.NewLine);
-                    }
-                    else
-                    {
-                        if (summary != null)
-                        {
-                            SetWorkingMessage(summary);
-                        }
-                    }
+                    Logger.DisplayLog(e, SetWorkingMessage, TxtOutput);
                 }
             });
         }
@@ -298,11 +249,10 @@ namespace DLaB.EarlyBoundGenerator
             if (ConnectionDetail != null)
             {   
                 TxtOutput.AppendText("CRM Authentication Type Detected: " + ConnectionDetail.AuthType + Environment.NewLine);
-                Settings.AuthType = ConnectionDetail.AuthType;
-                Settings.Domain = ConnectionDetail.UserDomain;
+                Settings.Domain = GetUserDomain();
                 Settings.Password = ConnectionDetail.GetUserPassword();
                 Settings.SupportsActions = ConnectionDetail.OrganizationMajorVersion >= Crm2013;
-                Settings.UseConnectionString = Settings.UseConnectionString || Settings.AuthType == AuthenticationProviderType.ActiveDirectory;
+                Settings.UseConnectionString = Settings.UseConnectionString; // #151 || Settings.AuthType == AuthenticationProviderType.ActiveDirectory;
                 Settings.UseCrmOnline = ConnectionDetail.UseOnline;
                 Settings.UserName = ConnectionDetail.UserName;
                 Settings.Url = GetUrlString();
@@ -312,8 +262,8 @@ namespace DLaB.EarlyBoundGenerator
                     // Fix for https://github.com/daryllabar/DLaB.Xrm.XrmToolBoxTools/issues/43
                     // Difficulties with Early Bound Generator #43
 
-                    var askForPassowrd = new PasswordDialog(this);
-                    Settings.Password = askForPassowrd.ShowDialog(this) == DialogResult.OK ? askForPassowrd.Password : "UNKNOWN";
+                    var askForPassword = new PasswordDialog(this);
+                    Settings.Password = askForPassword.ShowDialog(this) == DialogResult.OK ? askForPassword.Password : "UNKNOWN";
                 }
                 if (ConnectionDetail.AuthType == AuthenticationProviderType.ActiveDirectory && string.IsNullOrWhiteSpace(Settings.UserName))
                 {
@@ -321,10 +271,9 @@ namespace DLaB.EarlyBoundGenerator
                 }
             }
 
-            Settings.ActionOutPath = TxtActionPath.Text;
-            Settings.EntityOutPath = TxtEntityPath.Text;
+            SettingsMap.PushChanges();
             Settings.RootPath = Path.GetDirectoryName(Path.GetFullPath(TxtSettingsPath.Text));
-            if (ChkUseDeprecatedOptionSetNaming.Checked)
+            if (SettingsMap.UseDeprecatedOptionSetNaming)
             {
                 Settings.SetExtensionArgument(CreationType.OptionSets, CrmSrvUtilService.CodeWriterFilter, @"DLaB.CrmSvcUtilExtensions.OptionSet.CodeWriterFilterService,DLaB.CrmSvcUtilExtensions");
                 Settings.SetExtensionArgument(CreationType.OptionSets, CrmSrvUtilService.NamingService, string.Empty);
@@ -332,42 +281,37 @@ namespace DLaB.EarlyBoundGenerator
             else
             {
                 var defaultConfig = EarlyBoundGeneratorConfig.GetDefault();
+                defaultConfig.CrmSvcUtilRealtiveRootPath = Paths.PluginsPath;
                 Settings.SetExtensionArgument(CreationType.OptionSets, CrmSrvUtilService.CodeWriterFilter, defaultConfig.GetExtensionArgument(CreationType.OptionSets, CrmSrvUtilService.CodeWriterFilter).Value);
                 Settings.SetExtensionArgument(CreationType.OptionSets, CrmSrvUtilService.NamingService, defaultConfig.GetExtensionArgument(CreationType.OptionSets, CrmSrvUtilService.NamingService).Value);
             }
-
-            var extensions = Settings.ExtensionConfig;
-            extensions.AddDebuggerNonUserCode = ChkAddDebuggerNonUserCode.Checked;
-            extensions.AddNewFilesToProject = ChkAddFilesToProject.Checked;
-            extensions.CreateOneFilePerAction = ChkCreateOneActionFile.Checked;
-            extensions.CreateOneFilePerEntity = ChkCreateOneEntityFile.Checked;
-            extensions.CreateOneFilePerOptionSet = ChkCreateOneOptionSetFile.Checked;
-            extensions.GenerateActionAttributeNameConsts = ChkGenerateActionAttributeNameConsts.Checked;
-            extensions.GenerateAttributeNameConsts = ChkGenerateAttributeNameConsts.Checked;
-            extensions.GenerateAnonymousTypeConstructor = ChkGenerateAnonymousTypeConstructor.Checked;
-            extensions.GenerateEntityRelationships = ChkGenerateEntityRelationships.Checked;
-            extensions.GenerateEnumProperties = ChkGenerateOptionSetEnums.Checked;
-            extensions.InvalidCSharpNamePrefix = TxtInvalidCSharpNamePrefix.Text;
-            extensions.MakeReadonlyFieldsEditable = ChkMakeReadonlyFieldsEditable.Checked;
-            extensions.MakeResponseActionsEditable = ChkEditableResponseActions.Checked;
-            extensions.LocalOptionSetFormat = TxtOptionSetFormat.Text;
-            extensions.RemoveRuntimeVersionComment = ChkRemoveRuntimeComment.Checked;
-            extensions.UseXrmClient = ChkUseXrmClient.Checked;
-            extensions.UseDeprecatedOptionSetNaming = ChkUseDeprecatedOptionSetNaming.Checked;
-            extensions.UseTfsToCheckoutFiles = ChkUseTFS.Checked;
-            Settings.AudibleCompletionNotification = ChkAudibleCompletion.Checked;
-            Settings.IncludeCommandLine = ChkIncludeCommandLine.Checked;
-            Settings.MaskPassword = ChkMaskPassword.Checked;
-            Settings.Namespace = TxtNamespace.Text;
-            Settings.OptionSetOutPath = TxtOptionSetPath.Text;
-            Settings.ServiceContextName = string.IsNullOrWhiteSpace(TxtServiceContextName.Text) ? null : TxtServiceContextName.Text;
         }
 
+        private string GetUserDomain()
+        {
+            if (string.IsNullOrWhiteSpace(ConnectionDetail.UserDomain))
+            {
+                return ConnectionDetail.UseOnline
+                    ? ConnectionDetail.UserDomain
+                    : ConnectionDetail.UserName.Split('\\').FirstOrDefault(); // Domain\UserName
+            }
+            else
+            {
+                return ConnectionDetail.UserDomain;
+            }
+        }
         private string GetUrlString()
         {
-            var url = ConnectionDetail.OrganizationServiceUrl;
+            var orgName = ConnectionDetail.OrganizationUrlName;
+            var onPremUrl = ConnectionDetail.WebApplicationUrl;
+            onPremUrl = onPremUrl != null && !onPremUrl.ToLower().EndsWith(orgName.ToLower())
+                ? onPremUrl + orgName
+                : onPremUrl;
+            var url = ConnectionDetail.UseOnline 
+                ? ConnectionDetail.OrganizationServiceUrl
+                : onPremUrl;
             return Settings.UseConnectionString
-                ? url.Replace(@"/XRMServices/2011/Organization.svc", string.Empty)
+                ? url?.Replace(@"/XRMServices/2011/Organization.svc", string.Empty)
                 :  url;
 
             //if (auth == AuthenticationProviderType.ActiveDirectory)
@@ -390,22 +334,13 @@ namespace DLaB.EarlyBoundGenerator
 
         private void EnableForm(bool enable)
         {
+            BtnCreateActions.Enabled = enable;
             BtnCreateEntities.Enabled = enable;
             BtnCreateOptionSets.Enabled = enable;
             BtnCreateAll.Enabled = enable;
-            groupBox1.Enabled = enable;
-            tabControl1.Enabled = enable;
-        }
-
-        private void ChkIncludeCommandLine_CheckedChanged(object sender, EventArgs e)
-        {
-            ChkMaskPassword.Visible = ChkIncludeCommandLine.Checked;
-        }
-
-        private void ChkGenerateOptionSetEnums_CheckedChanged(object sender, EventArgs e)
-        {
-            BtnEnumMappings.Visible = ChkGenerateOptionSetEnums.Checked;
-            BtnUnmappedProperties.Visible = ChkGenerateOptionSetEnums.Checked;
+            TxtSettingsPath.Enabled = enable;
+            TxtOutput.Enabled = enable;
+            PropertiesGrid.Enabled = enable;
         }
 
         #region Create Button Click Events
@@ -432,150 +367,31 @@ namespace DLaB.EarlyBoundGenerator
 
         #endregion // Create Button Click Events
 
-        private void BtnSpecifyAttributeNames_Click(object sender, EventArgs e)
-        {
-            var dialog = new SpecifyAttributeNamesDialog(this) {
-                ConfigValue = Settings.ExtensionConfig.EntityAttributeSpecifiedNames
-            };
-            var result = dialog.ShowDialog();
-            if (result != DialogResult.OK) return;
-            Settings.ExtensionConfig.EntityAttributeSpecifiedNames = dialog.ConfigValue;
-            SaveSettings();
-        }
-
-        private void BtnActionsToSkip_Click(object sender, EventArgs e)
-        {
-            var dialog = new SpecifyActionsDialog(this) { SpecifiedActions = Settings.ExtensionConfig.ActionsToSkip };
-            if (dialog.ShowDialog() != DialogResult.OK) return;
-            Settings.ExtensionConfig.ActionsToSkip = dialog.SpecifiedActions;
-            SaveSettings();
-        }
-
-        private void BtnEntitesToSkip_Click(object sender, EventArgs e)
-        {
-            var dialog = new SpecifyEntitiesDialog(this) { SpecifiedEntities = Settings.ExtensionConfig.EntitiesToSkip };
-            if (dialog.ShowDialog() == DialogResult.OK)
-            {
-                Settings.ExtensionConfig.EntitiesToSkip = dialog.SpecifiedEntities;
-                SaveSettings();
-            }
-        }
-
-        private void BtnOptionSetsToSkip_Click(object sender, EventArgs e)
-        {
-            var dialog = new SpecifyOptionSetsDialog(this) { OptionSets = Settings.ExtensionConfig.OptionSetsToSkip };
-            if (dialog.ShowDialog() == DialogResult.OK)
-            {
-                Settings.ExtensionConfig.OptionSetsToSkip = dialog.OptionSets;
-                SaveSettings();
-            }
-        }
-
-        private void BtnEnumMappings_Click(object sender, EventArgs e)
-        {
-            var dialog = new AttributesToEnumMapperDialog(this) { ConfigValue = Settings.ExtensionConfig.PropertyEnumMappings };
-            var result = dialog.ShowDialog();
-            if (result == DialogResult.OK)
-            {
-                Settings.ExtensionConfig.PropertyEnumMappings = dialog.ConfigValue;
-                SaveSettings();
-            }
-        }
-
-        private void BtnUnmappedProperties_Click(object sender, EventArgs e)
-        {
-            var dialog = new SpecifyAttributesDialog (this) { ConfigValue = Settings.ExtensionConfig.UnmappedProperties };
-            var result = dialog.ShowDialog();
-            if (result == DialogResult.OK)
-            {
-                Settings.ExtensionConfig.UnmappedProperties = dialog.ConfigValue;
-                SaveSettings();
-            }
-        }
-
-        private void BtnOpenActionPathDialog_Click(object sender, EventArgs e)
-        {
-            openFileDialog1.SetCsFilePath(TxtActionPath, ConnectionSettings.SettingsDirectoryName);
-        }
-
-        private void BtnOpenEntityPathDialog_Click(object sender, EventArgs e)
-        {
-            openFileDialog1.SetCsFilePath(TxtEntityPath, ConnectionSettings.SettingsDirectoryName);
-        }
-
-        private void BtnOpenOptionSetPathDialog_Click(object sender, EventArgs e)
-        {
-            openFileDialog1.SetCsFilePath(TxtOptionSetPath, ConnectionSettings.SettingsDirectoryName);
-        }
         private void BtnOpenSettingsPathDialog_Click(object sender, EventArgs e)
         {
-            openFileDialog1.SetXmlFilePath(TxtSettingsPath);
-        }
-
-        private void ChkCreateOneActionFile_CheckedChanged(object sender, EventArgs e)
-        {
-            LblActionsDirectory.Visible = ChkCreateOneActionFile.Checked;
-            LblActionPath.Visible = !ChkCreateOneActionFile.Checked;
-            SetAddFilesToProjectVisibility();
-
-            ConditionallyAddRemoveExtension(TxtActionPath, "Actions.cs", ChkCreateOneActionFile.Checked);
-        }
-
-        private void ChkCreateOneOptionSetFile_CheckedChanged(object sender, EventArgs e)
-        {
-            LblOptionSetsDirectory.Visible = ChkCreateOneOptionSetFile.Checked;
-            LblOptionSetPath.Visible = !ChkCreateOneOptionSetFile.Checked;
-            SetAddFilesToProjectVisibility();
-
-            ChkAddFilesToProject.Visible = !ChkCreateOneEntityFile.Checked;
-
-            ConditionallyAddRemoveExtension(TxtOptionSetPath, "OptionSets.cs", ChkCreateOneOptionSetFile.Checked);
-        }
-
-        private void ChkUseDeprecatedOptionSetNaming_CheckedChanged(object sender, EventArgs e)
-        {
-            LblOptionSetFormat.Visible = !ChkUseDeprecatedOptionSetNaming.Checked;
-            TxtOptionSetFormat.Visible = !ChkUseDeprecatedOptionSetNaming.Checked;
-        }
-
-        private static void ConditionallyAddRemoveExtension(TextBox textBox, string singleClassFileName, bool @checked)
-        {
-            var fileName = textBox.Text;
-            bool hasExtension = Path.GetExtension(fileName) != string.Empty;
-
-            if (@checked && hasExtension)
+            if (openFileDialog1.SetXmlFilePath(TxtSettingsPath))
             {
-                // Remove Extension
-                textBox.Text = Path.GetDirectoryName(fileName);
-            }
-            else if (!@checked && !hasExtension)
-            {
-                // Add Actions.cs
-                textBox.Text = Path.Combine(fileName, singleClassFileName);
+                ValidatedSettingsPath();
             }
         }
 
-        private void ChkCreateOneEntityFile_CheckedChanged(object sender, EventArgs e)
+        private void TxtSettingsPath_Leave(object sender, EventArgs e)
         {
-            LblEntitiesDirectory.Visible = ChkCreateOneEntityFile.Checked;
-            LblEntityPath.Visible = !ChkCreateOneEntityFile.Checked;
-            SetAddFilesToProjectVisibility();
-
-            ConditionallyAddRemoveExtension(TxtEntityPath, "Entities.cs", ChkCreateOneEntityFile.Checked);
+            ValidatedSettingsPath();
         }
 
-        private void actionsTab_Enter(object sender, EventArgs e)
-        {
-            ExecuteMethod(DisplayActionsIfSupported, true);
-        }
-
-        private void TxtSettingsPath_TextChanged(object sender, EventArgs e)
+        private void ValidatedSettingsPath()
         {
             if (!FormLoaded)
             {
                 return;
             }
             var file = Path.GetFullPath(TxtSettingsPath.Text);
+            if (ConnectionSettings.FullSettingsPath == file)
+            {
+                // No Change.  Exit
+                return;
+            }
             if (File.Exists(file))
             {
                 SetConnectionSettingOnSettingsFileChanged();
@@ -584,23 +400,11 @@ namespace DLaB.EarlyBoundGenerator
             {
                 MessageBox.Show($@"File ""{file}"" Not Found!  Unable to Update the Settings");
             }
-
         }
 
-        public void DisplayActionsIfSupported(bool displayErrorIfUnsupported)
+        public void DisplayActionsIfSupported()
         {
-            if (ConnectionDetail.OrganizationMajorVersion < Crm2013)
-            {
-                if (displayErrorIfUnsupported)
-                {
-                    MessageBox.Show(@"Your version of CRM doesn't support Actions!");
-                }
-                tabControl1.TabPages.Remove(actionsTab);
-            }
-            else if(!tabControl1.TabPages.Contains(actionsTab))
-            {
-                tabControl1.TabPages.Add(actionsTab);
-            }
+            BtnCreateActions.Enabled = ConnectionDetail.OrganizationMajorVersion >= Crm2013;
         }
 
         private void SetConnectionSettingOnLoad()
@@ -630,9 +434,7 @@ namespace DLaB.EarlyBoundGenerator
             {
                 // New Connection Did Have a Connection Settings, load settings
                 ConnectionSettings = localSettings;
-                TxtSettingsPath.TextChanged -= TxtSettingsPath_TextChanged;
                 TxtSettingsPath.Text = ConnectionSettings.SettingsPath;
-                TxtSettingsPath.TextChanged += TxtSettingsPath_TextChanged;
                 HydrateUiFromSettings(ConnectionSettings.FullSettingsPath);
             }
         }
@@ -663,7 +465,7 @@ namespace DLaB.EarlyBoundGenerator
             EntityMetadatas = null;
             GlobalOptionSets = null;
             Actions = null;
-            DisplayActionsIfSupported(false);
+            DisplayActionsIfSupported();
             SetConnectionSettingOnConnectionChanged();
         }
 
@@ -673,6 +475,11 @@ namespace DLaB.EarlyBoundGenerator
             {
                 ((TextBox) sender)?.SelectAll();
             }
+        }
+
+        private void PropertiesGrid_PropertyValueChanged(object s, PropertyValueChangedEventArgs e)
+        {
+            SettingsMap.OnPropertyValueChanged(s, e);
         }
     }
 
